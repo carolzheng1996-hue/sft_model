@@ -1,0 +1,22 @@
+{
+  "timemqa_tsqa_alpaca": {
+    "file_name": "timemqa_tsqa_alpaca.json",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output",
+      "system": "system",
+      "history": "history"
+    }
+  },
+  "timeseries_exam1_alpaca": {
+    "file_name": "timeseries_exam1_alpaca.json",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output",
+      "system": "system",
+      "history": "history"
+    }
+  }
+}

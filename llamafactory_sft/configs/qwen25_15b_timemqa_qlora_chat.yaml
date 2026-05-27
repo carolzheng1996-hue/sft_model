@@ -1,0 +1,11 @@
+### model
+model_name_or_path: ../models/Qwen2.5-1.5B
+adapter_name_or_path: saves/qwen2.5-1.5b/timemqa/qlora-sft
+template: qwen
+trust_remote_code: true
+finetuning_type: lora
+
+### generation
+max_new_tokens: 256
+temperature: 0.7
+top_p: 0.9

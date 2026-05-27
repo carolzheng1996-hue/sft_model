@@ -1,0 +1,437 @@
+# Qwen2.5-1.5B Time-Series SFT Experiment Workflow
+
+本文档说明一个完整实验流程：
+
+1. 先测试本地 Qwen2.5-1.5B 基座模型在 `TimeSeriesExam1` 数据集上的回复效果。
+2. 使用 `Time-MQA/TSQA` 数据集对 Qwen2.5-1.5B 做 SFT。
+3. 使用微调后的模型在一批 `TimeSeriesExam1` 样本上做评测。
+
+本文默认模型本地路径为：
+
+```text
+models/Qwen2.5-1.5B
+```
+
+如果你的模型目录不同，把命令里的 `models/Qwen2.5-1.5B` 或 `../models/Qwen2.5-1.5B` 替换成你的本地路径。
+
+## 目录约定
+
+从仓库根目录看：
+
+```text
+.
+├── models/Qwen2.5-1.5B                         # 本地基座模型
+├── datasets/AutonLab/TimeSeriesExam1/          # 本地 TimeSeriesExam1 数据
+├── trl_sft/                                    # TRL 训练与评测
+├── llamafactory_sft/                           # LLaMA-Factory 训练与评测
+└── scripts/check_local_model.py                # 通用本地模型检查脚本
+```
+
+`TimeSeriesExam1` 本地数据应包含：
+
+```text
+datasets/AutonLab/TimeSeriesExam1/timeseries_exam1_test.json
+datasets/AutonLab/TimeSeriesExam1/data/test-00000-of-00001.parquet
+```
+
+## 0. 检查本地模型是否可用
+
+先确认本地模型能被 Transformers 正常加载并生成文本：
+
+```bash
+cd /Users/monychen/Documents/sft
+python scripts/check_local_model.py --model_name_or_path models/Qwen2.5-1.5B
+```
+
+成功时会看到：
+
+```text
+Tokenizer loaded...
+Model loaded...
+OK: local model can be loaded and used for generation.
+```
+
+如果模型路径不同：
+
+```bash
+python scripts/check_local_model.py --model_name_or_path /path/to/local/qwen2.5-1.5b
+```
+
+## 1. 测试基座模型在 TimeSeriesExam1 上的效果
+
+推荐使用这个脚本：
+
+```text
+llamafactory_sft/scripts/eval_exam1_base_model.sh
+```
+
+它会读取已经转换好的：
+
+```text
+llamafactory_sft/data/timeseries_exam1_alpaca.json
+```
+
+并输出每条样本的：
+
+```text
+expected answer
+model prediction
+exact_match
+```
+
+运行：
+
+```bash
+cd /Users/monychen/Documents/sft/llamafactory_sft
+
+bash scripts/eval_exam1_base_model.sh \
+  --model_name_or_path ../models/Qwen2.5-1.5B \
+  --max_samples 20
+```
+
+输出文件：
+
+```text
+llamafactory_sft/reports/timeseries_exam1_base_predictions.jsonl
+```
+
+### 1.1 当前准确率如何计算
+
+`eval_exam1_base_model.py` 使用 simple exact match 评估准确率。它会把模型生成结果和标准答案做简单规范化后比较：
+
+```text
+strip leading/trailing spaces
+lowercase
+collapse repeated whitespace
+```
+
+也就是类似：
+
+```python
+normalize_answer(prediction) == normalize_answer(expected)
+```
+
+因此：
+
+```text
+Expected:   Decrease
+Prediction: decrease
+```
+
+会算正确。
+
+但下面这种语义正确的回答不会算正确：
+
+```text
+Expected:   Decrease
+Prediction: The amplitude decreases.
+```
+
+所以当前准确率是一个偏严格的 `exact_match` 指标。它适合快速比较模型前后变化，但可能低估带解释性回答的真实效果。后续如果需要更精细的评估，可以增加选项匹配、数值容差匹配或 judge 规则。
+
+如果要测试全部 746 条：
+
+```bash
+bash scripts/eval_exam1_base_model.sh \
+  --model_name_or_path ../models/Qwen2.5-1.5B \
+  --max_samples 0
+```
+
+建议先用 `--max_samples 20` 跑通，再扩大样本量。
+
+## 2. 用 Time-MQA/TSQA 微调 Qwen2.5-1.5B
+
+推荐先使用 QLoRA，显存占用更低。你可以选择 TRL 或 LLaMA-Factory。两者都使用本地模型，不会训练时下载模型。
+
+### 2.0 Time-MQA 是否需要提前格式转换
+
+使用 TRL 微调时，`Time-MQA/TSQA` 不需要转换成 Alpaca JSON，但必须先转换成 TRL conversational `messages` JSON。原始数据字段解析不放在 `train_sft.py` 中。
+
+`trl_sft/train_sft.py` 只接收固定格式输入：
+
+```json
+{
+  "messages": [
+    {"role": "system", "content": "..."},
+    {"role": "user", "content": "..."},
+    {"role": "assistant", "content": "..."}
+  ]
+}
+```
+
+核心流程是：
+
+```text
+原始 Time-MQA/TSQA 数据
+        ↓ preparation script
+标准 messages JSON
+        ↓ train_sft.py 校验 messages
+        ↓ SFTTrainer
+开始训练
+```
+
+LLaMA-Factory 不同。LLaMA-Factory 需要先把数据转成它能识别的 Alpaca/sharegpt 格式，并在 `data/dataset_info.json` 里注册。因此 LLaMA-Factory 路径需要：
+
+```bash
+cd llamafactory_sft
+bash scripts/prepare_data.sh
+```
+
+生成：
+
+```text
+llamafactory_sft/data/timemqa_tsqa_alpaca.json
+```
+
+### 方案 A：TRL 微调
+
+进入 TRL 目录：
+
+```bash
+cd /Users/monychen/Documents/sft/trl_sft
+```
+
+如果你要从 Hugging Face 读取完整 `Time-MQA/TSQA` 并编写转换脚本，需要先在 shell 里设置：
+
+```bash
+export HF_TOKEN=hf_xxx
+```
+
+如果你已经把 `Time-MQA/TSQA` 下载到本地，转换脚本可以直接读取本地文件，不需要 `HF_TOKEN`。
+
+当前仓库中已有一份本地 Time-MQA 示例 CSV：
+
+```text
+timemqa/open_ended_QA.csv
+```
+
+这个 CSV 的 `question` 和 `answer` 被放在同一个 `QA_list` 字符串列里。这个特殊解析不放在 `train_sft.py` 中，而是先用单独的数据准备脚本转成 TRL conversational `messages` JSON：
+
+```bash
+bash scripts/prepare_timemqa_local_data.sh
+```
+
+输出文件：
+
+```text
+trl_sft/data/processed/timemqa_local_train.json
+```
+
+标准列：
+
+```text
+messages
+```
+
+其中 `application_domain`、`task_type`、`question_format` 会被放进 `user.content` 的 `Context:` 部分。可以检查转换后的标准数据：
+
+```bash
+python scripts/inspect_dataset.py \
+  --dataset_name local \
+  --data_files data/processed/timemqa_local_train.json
+```
+
+如果 GPU 不支持 bf16，改用：
+
+```bash
+--fp16
+```
+
+训练输出：
+
+```text
+trl_sft/outputs/qwen2.5-1.5b-timemqa-local-lora
+```
+
+这是 LoRA adapter，不会覆盖原始基座模型。
+
+使用仓库中的本地 Time-MQA CSV，运行：
+
+```bash
+bash scripts/prepare_timemqa_local_data.sh
+bash scripts/train_timemqa_local_qlora.sh
+```
+
+训练输出：
+
+```text
+trl_sft/outputs/qwen2.5-1.5b-timemqa-local-lora
+```
+
+### 方案 B：LLaMA-Factory 微调
+
+进入 LLaMA-Factory 目录：
+
+```bash
+cd /Users/monychen/Documents/sft/llamafactory_sft
+```
+
+准备 Time-MQA Alpaca 数据：
+
+```bash
+bash scripts/prepare_data.sh
+```
+
+训练 QLoRA：
+
+```bash
+bash scripts/train_qlora.sh
+```
+
+训练输出：
+
+```text
+llamafactory_sft/saves/qwen2.5-1.5b/timemqa/qlora-sft
+```
+
+## 3. 用微调后的模型测试 TimeSeriesExam1
+
+推荐使用 TRL 目录下的批量评测脚本：
+
+```text
+trl_sft/scripts/eval_exam1_sft.sh
+```
+
+它可以加载：
+
+```text
+本地基座模型 + LoRA adapter
+```
+
+并在原始 `TimeSeriesExam1` JSON 上生成预测。
+
+### 3.1 测试 TRL 微调后的 adapter
+
+如果第 2 步使用的是 TRL，并且输出目录是：
+
+```text
+trl_sft/outputs/qwen2.5-1.5b-timemqa-local-lora
+```
+
+运行：
+
+```bash
+cd /Users/monychen/Documents/sft/trl_sft
+
+bash scripts/eval_exam1_sft.sh \
+  --model_name_or_path ../models/Qwen2.5-1.5B \
+  --adapter_name_or_path outputs/qwen2.5-1.5b-timemqa-local-lora \
+  --max_samples 50
+```
+
+输出：
+
+```text
+trl_sft/reports/timeseries_exam1_sft_predictions.jsonl
+```
+
+### 3.1.1 微调后评测的准确率计算
+
+`eval_exam1_sft.py` 和第 1 步的基座模型评测脚本一样，也使用 simple exact match：
+
+```text
+normalize_answer(prediction) == normalize_answer(expected)
+```
+
+它会输出：
+
+```text
+expected answer
+model prediction
+exact_match
+Exact match: correct/total
+```
+
+注意，模型如果回答了完整句子而不是直接输出选项文本，可能语义正确但 exact match 为 false。因此比较实验结果时，建议先保持相同评估脚本和相同 `max_samples`，看微调前后 exact match 的相对变化。
+
+测试全部样本：
+
+```bash
+bash scripts/eval_exam1_sft.sh \
+  --model_name_or_path ../models/Qwen2.5-1.5B \
+  --adapter_name_or_path outputs/qwen2.5-1.5b-timemqa-local-lora \
+  --max_samples 0
+```
+
+### 3.2 测试 LLaMA-Factory 微调后的 adapter
+
+如果第 2 步使用的是 LLaMA-Factory，adapter 路径通常是：
+
+```text
+llamafactory_sft/saves/qwen2.5-1.5b/timemqa/qlora-sft
+```
+
+可以继续用 TRL 的评测脚本加载这个 PEFT adapter：
+
+```bash
+cd /Users/monychen/Documents/sft/trl_sft
+
+bash scripts/eval_exam1_sft.sh \
+  --model_name_or_path ../models/Qwen2.5-1.5B \
+  --adapter_name_or_path ../llamafactory_sft/saves/qwen2.5-1.5b/timemqa/qlora-sft \
+  --max_samples 50
+```
+
+如果你已经把 LoRA 合并成 merged model，则使用：
+
+```bash
+bash scripts/eval_exam1_sft.sh \
+  --model_name_or_path ../llamafactory_sft/saves/qwen2.5-1.5b/timemqa/merged \
+  --no-use_adapter \
+  --max_samples 50
+```
+
+## 4. 建议的实验记录规范
+
+每次实验建议记录：
+
+```text
+base_model: models/Qwen2.5-1.5B
+training_dataset: Time-MQA/TSQA
+eval_dataset: TimeSeriesExam1
+framework: TRL or LLaMA-Factory
+method: QLoRA or LoRA
+max_seq_length/cutoff_len: 2048
+lora_rank/lora_alpha/lora_dropout: 16/32/0.05
+learning_rate: 2e-4
+epochs: 2
+adapter_path: ...
+prediction_file: ...
+exact_match: ...
+```
+
+建议按这个顺序比较：
+
+1. 基座模型在 TimeSeriesExam1 上的结果。
+2. 使用 Time-MQA 微调后的模型在 TimeSeriesExam1 上的结果。
+3. 如果效果不好，再调整 `max_seq_length`、上下文字段格式、LoRA 参数或模型规模。
+
+## 5. 常用命令汇总
+
+检查模型：
+
+```bash
+python scripts/check_local_model.py --model_name_or_path models/Qwen2.5-1.5B
+```
+
+基座模型测试 Exam1：
+
+```bash
+cd llamafactory_sft
+bash scripts/eval_exam1_base_model.sh --model_name_or_path ../models/Qwen2.5-1.5B --max_samples 20
+```
+
+TRL 使用 Time-MQA 微调：
+
+```bash
+cd trl_sft
+bash scripts/prepare_timemqa_local_data.sh
+bash scripts/train_timemqa_local_qlora.sh
+```
+
+微调后测试 Exam1：
+
+```bash
+cd trl_sft
+bash scripts/eval_exam1_sft.sh --adapter_name_or_path outputs/qwen2.5-1.5b-timemqa-local-lora --max_samples 50
+```

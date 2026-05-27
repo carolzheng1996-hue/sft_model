@@ -1,0 +1,18 @@
+# TRL SFT defaults for TimeSeriesExam1 after conversion to TRL messages format.
+model_name_or_path: ../models/Qwen2.5-1.5B
+chat_template: qwen
+dataset_name: local
+data_files:
+  - data/processed/timeseries_exam1_messages.json
+output_dir: outputs/qwen2.5-1.5b-timeseries-exam1-lora
+max_seq_length: 2048
+num_train_epochs: 2
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 2.0e-4
+warmup_ratio: 0.03
+lr_scheduler_type: cosine
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+use_4bit: true

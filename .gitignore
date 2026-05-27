@@ -1,0 +1,31 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.DS_Store
+
+# Python packaging / caches
+*.egg-info/
+
+# Training outputs
+trl_sft/outputs/
+llamafactory_sft/saves/
+outputs/
+models/
+datasets/.hf_cache/
+datasets/**/.cache/
+datasets/AutonLab/TimeSeriesExam1/timeseries_exam1_test.json
+datasets/AutonLab/TimeSeriesExam1/data/*.parquet
+
+# Local virtual environments
+trl_sft/.venv/
+llamafactory_sft/.venv/
+.venv/
+
+# Generated datasets / reports
+timeMQA/*.csv
+trl_sft/data/processed/*.json
+llamafactory_sft/data/*.json
+!llamafactory_sft/data/dataset_info.json
+reports/
