@@ -242,6 +242,39 @@ bash scripts/train_timemqa_local_qlora.sh
 trl_sft/outputs/qwen2.5-1.5b-timemqa-local-lora
 ```
 
+### 2.1 TRL SFT 直接执行命令
+
+如果只跑 TRL 路线，可以从仓库根目录按下面顺序执行：
+
+```bash
+cd /Users/monychen/Documents/sft/trl_sft
+
+# 1. 把本地 Time-MQA CSV 转成 TRL messages 格式
+bash scripts/prepare_timemqa_local_data.sh
+
+# 2. 检查转换后的训练数据
+python scripts/inspect_dataset.py \
+  --dataset_name local \
+  --data_files data/processed/timemqa_local_train.json
+
+# 3. 用 QLoRA 做 TRL SFT
+bash scripts/train_timemqa_local_qlora.sh
+
+# 4. 用官方 TimeSeriesExam 评测规则测试 LoRA adapter
+python scripts/eval_exam1_qwen15b_lora_official.py \
+  --model_name_or_path ../models/Qwen2.5-1.5B \
+  --adapter_name_or_path outputs/qwen2.5-1.5b-timemqa-local-lora \
+  --max_samples 50
+```
+
+如果你的 GPU 不支持 bf16，需要编辑：
+
+```text
+trl_sft/scripts/train_timemqa_local_qlora.sh
+```
+
+把 `--bf16` 改成 `--fp16`。
+
 ### 方案 B：LLaMA-Factory 微调
 
 进入 LLaMA-Factory 目录：
