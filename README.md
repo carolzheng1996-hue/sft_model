@@ -79,8 +79,22 @@ bash scripts/prepare_exam1_data.sh
 Test a local base model on Exam1 before fine-tuning:
 
 ```bash
-cd llamafactory_sft
-bash scripts/eval_exam1_base_model.sh --model_name_or_path ../models/Qwen2.5-1.5B --max_samples 20
+cd trl_sft
+python scripts/eval_exam1_qwen15b_base_official.py \
+  --model_name_or_path ../models/Qwen2.5-1.5B \
+  --max_samples 20
+```
+
+This uses the official TimeSeriesExam flexible scoring rule from <https://github.com/moment-timeseries-foundation-model/TimeSeriesExam>: the main metric is `official_flexible_accuracy`, which checks whether the model response contains the correct formatted option, such as `B) No autocorrelation`.
+
+After LoRA training, evaluate the adapter with the same official-style metric:
+
+```bash
+cd trl_sft
+python scripts/eval_exam1_qwen15b_lora_official.py \
+  --model_name_or_path ../models/Qwen2.5-1.5B \
+  --adapter_name_or_path outputs/qwen2.5-1.5b-timemqa-local-lora \
+  --max_samples 50
 ```
 
 TRL training now requires a prepared conversational `messages` dataset. `trl_sft/train_sft.py` no longer trains directly from raw TimeSeriesExam1 columns such as `ts1`, `ts2`, or `options`; convert TimeSeriesExam1 to a file with a `messages` column before using the TRL trainer.

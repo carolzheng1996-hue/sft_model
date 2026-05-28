@@ -165,21 +165,35 @@ python train_sft.py \
 
 Convert TimeSeriesExam1 to a JSON/JSONL/Parquet file with a `messages` column before training. `train_sft.py` no longer accepts raw TimeSeriesExam1 fields such as `ts1`, `ts2`, or `options`.
 
-After training, evaluate the saved LoRA adapter on Exam1:
+## Evaluate TimeSeriesExam1
+
+TimeSeriesExam1 is a single-choice exam with 2-4 options per question. The evaluation scripts below adapt the official TimeSeriesExam GitHub scoring logic for local Qwen models: <https://github.com/moment-timeseries-foundation-model/TimeSeriesExam>. The primary metric is official flexible accuracy: a response is correct when it contains the formatted correct option, such as `B) No autocorrelation`.
+
+Evaluate the untrained base model:
 
 ```bash
-bash scripts/eval_exam1_sft.sh \
-  --adapter_name_or_path outputs/qwen2.5-1.5b-timeseries-exam1-lora \
+python scripts/eval_exam1_qwen15b_base_official.py \
+  --model_name_or_path ../models/Qwen2.5-1.5B \
   --max_samples 50
 ```
 
-The script writes JSONL predictions to:
+Evaluate a LoRA adapter:
 
-```text
-reports/timeseries_exam1_sft_predictions.jsonl
+```bash
+python scripts/eval_exam1_qwen15b_lora_official.py \
+  --model_name_or_path ../models/Qwen2.5-1.5B \
+  --adapter_name_or_path outputs/qwen2.5-1.5b-timemqa-local-lora \
+  --max_samples 50
 ```
 
-It prints each expected answer, model prediction, and a simple exact-match score. Use `--max_samples 0` to evaluate all examples.
+The scripts write JSONL predictions to:
+
+```text
+reports/timeseries_exam1_qwen15b_base_official_predictions.jsonl
+reports/timeseries_exam1_qwen15b_lora_official_predictions.jsonl
+```
+
+They print official flexible accuracy and official strict accuracy. Flexible scoring follows the official repository's default `evaluate_response(..., mode="flexible")` behavior. Use `--max_samples 0` to evaluate all examples.
 
 For a future dataset, write a small preparation script that converts it to TRL conversational `messages` first. See `scripts/prepare_timemqa_local_data.py` for the local Time-MQA CSV example.
 

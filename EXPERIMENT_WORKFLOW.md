@@ -59,16 +59,16 @@ python scripts/check_local_model.py --model_name_or_path /path/to/local/qwen2.5-
 
 ## 1. 测试基座模型在 TimeSeriesExam1 上的效果
 
-推荐使用这个脚本：
+推荐使用 TRL 目录下适配官方 TimeSeriesExam 评测逻辑的脚本：
 
 ```text
-llamafactory_sft/scripts/eval_exam1_base_model.sh
+trl_sft/scripts/eval_exam1_qwen15b_base_official.py
 ```
 
-它会读取已经转换好的：
+它会读取本地原始 Exam1 JSON：
 
 ```text
-llamafactory_sft/data/timeseries_exam1_alpaca.json
+datasets/AutonLab/TimeSeriesExam1/timeseries_exam1_test.json
 ```
 
 并输出每条样本的：
@@ -76,15 +76,17 @@ llamafactory_sft/data/timeseries_exam1_alpaca.json
 ```text
 expected answer
 model prediction
-exact_match
+answer_option_letter
+official_flexible_correct
+official_strict_correct
 ```
 
 运行：
 
 ```bash
-cd /Users/monychen/Documents/sft/llamafactory_sft
+cd /Users/monychen/Documents/sft/trl_sft
 
-bash scripts/eval_exam1_base_model.sh \
+python scripts/eval_exam1_qwen15b_base_official.py \
   --model_name_or_path ../models/Qwen2.5-1.5B \
   --max_samples 20
 ```
@@ -92,47 +94,29 @@ bash scripts/eval_exam1_base_model.sh \
 输出文件：
 
 ```text
-llamafactory_sft/reports/timeseries_exam1_base_predictions.jsonl
+trl_sft/reports/timeseries_exam1_qwen15b_base_official_predictions.jsonl
 ```
 
 ### 1.1 当前准确率如何计算
 
-`eval_exam1_base_model.py` 使用 simple exact match 评估准确率。它会把模型生成结果和标准答案做简单规范化后比较：
+`eval_exam1_qwen15b_base_official.py` 使用官方 GitHub 仓库 `evaluate/evaluate.py` 的默认 flexible 规则作为主指标：<https://github.com/moment-timeseries-foundation-model/TimeSeriesExam>。官方逻辑等价于检查模型回复中是否包含：
 
 ```text
-strip leading/trailing spaces
-lowercase
-collapse repeated whitespace
+<正确选项字母>) <标准答案文本>
 ```
 
-也就是类似：
-
-```python
-normalize_answer(prediction) == normalize_answer(expected)
-```
-
-因此：
+例如标准答案是 B 选项 `No autocorrelation`，回复中包含下面文本就算正确：
 
 ```text
-Expected:   Decrease
-Prediction: decrease
+B) No autocorrelation
 ```
 
-会算正确。
-
-但下面这种语义正确的回答不会算正确：
-
-```text
-Expected:   Decrease
-Prediction: The amplitude decreases.
-```
-
-所以当前准确率是一个偏严格的 `exact_match` 指标。它适合快速比较模型前后变化，但可能低估带解释性回答的真实效果。后续如果需要更精细的评估，可以增加选项匹配、数值容差匹配或 judge 规则。
+脚本也输出官方 strict 规则作为辅助指标：只检查最后一行是否包含标准答案文本。
 
 如果要测试全部 746 条：
 
 ```bash
-bash scripts/eval_exam1_base_model.sh \
+python scripts/eval_exam1_qwen15b_base_official.py \
   --model_name_or_path ../models/Qwen2.5-1.5B \
   --max_samples 0
 ```
@@ -286,10 +270,10 @@ llamafactory_sft/saves/qwen2.5-1.5b/timemqa/qlora-sft
 
 ## 3. 用微调后的模型测试 TimeSeriesExam1
 
-推荐使用 TRL 目录下的批量评测脚本：
+推荐继续使用 TRL 目录下适配官方 scoring 的评测脚本：
 
 ```text
-trl_sft/scripts/eval_exam1_sft.sh
+trl_sft/scripts/eval_exam1_qwen15b_lora_official.py
 ```
 
 它可以加载：
@@ -313,7 +297,7 @@ trl_sft/outputs/qwen2.5-1.5b-timemqa-local-lora
 ```bash
 cd /Users/monychen/Documents/sft/trl_sft
 
-bash scripts/eval_exam1_sft.sh \
+python scripts/eval_exam1_qwen15b_lora_official.py \
   --model_name_or_path ../models/Qwen2.5-1.5B \
   --adapter_name_or_path outputs/qwen2.5-1.5b-timemqa-local-lora \
   --max_samples 50
@@ -322,32 +306,33 @@ bash scripts/eval_exam1_sft.sh \
 输出：
 
 ```text
-trl_sft/reports/timeseries_exam1_sft_predictions.jsonl
+trl_sft/reports/timeseries_exam1_qwen15b_lora_official_predictions.jsonl
 ```
 
 ### 3.1.1 微调后评测的准确率计算
 
-`eval_exam1_sft.py` 和第 1 步的基座模型评测脚本一样，也使用 simple exact match：
+`eval_exam1_qwen15b_lora_official.py` 和第 1 步的基座模型评测脚本一样，使用官方 flexible accuracy 作为主指标：
 
 ```text
-normalize_answer(prediction) == normalize_answer(expected)
+response contains "<正确选项字母>) <标准答案文本>"
 ```
 
 它会输出：
 
 ```text
 expected answer
-model prediction
-exact_match
-Exact match: correct/total
+model response
+official_flexible_correct
+official_strict_correct
+Official flexible accuracy: correct/total
 ```
 
-注意，模型如果回答了完整句子而不是直接输出选项文本，可能语义正确但 exact match 为 false。因此比较实验结果时，建议先保持相同评估脚本和相同 `max_samples`，看微调前后 exact match 的相对变化。
+比较实验结果时，优先看基座模型和 LoRA 模型在相同样本范围上的 official flexible accuracy。
 
 测试全部样本：
 
 ```bash
-bash scripts/eval_exam1_sft.sh \
+python scripts/eval_exam1_qwen15b_lora_official.py \
   --model_name_or_path ../models/Qwen2.5-1.5B \
   --adapter_name_or_path outputs/qwen2.5-1.5b-timemqa-local-lora \
   --max_samples 0
@@ -366,18 +351,17 @@ llamafactory_sft/saves/qwen2.5-1.5b/timemqa/qlora-sft
 ```bash
 cd /Users/monychen/Documents/sft/trl_sft
 
-bash scripts/eval_exam1_sft.sh \
+python scripts/eval_exam1_qwen15b_lora_official.py \
   --model_name_or_path ../models/Qwen2.5-1.5B \
   --adapter_name_or_path ../llamafactory_sft/saves/qwen2.5-1.5b/timemqa/qlora-sft \
   --max_samples 50
 ```
 
-如果你已经把 LoRA 合并成 merged model，则使用：
+如果你已经把 LoRA 合并成 merged model，则可以用基座模型评测入口直接指向 merged model：
 
 ```bash
-bash scripts/eval_exam1_sft.sh \
+python scripts/eval_exam1_qwen15b_base_official.py \
   --model_name_or_path ../llamafactory_sft/saves/qwen2.5-1.5b/timemqa/merged \
-  --no-use_adapter \
   --max_samples 50
 ```
 
@@ -397,13 +381,14 @@ learning_rate: 2e-4
 epochs: 2
 adapter_path: ...
 prediction_file: ...
-exact_match: ...
+official_flexible_accuracy: ...
+official_strict_accuracy: ...
 ```
 
 建议按这个顺序比较：
 
-1. 基座模型在 TimeSeriesExam1 上的结果。
-2. 使用 Time-MQA 微调后的模型在 TimeSeriesExam1 上的结果。
+1. 基座模型在 TimeSeriesExam1 上的 official flexible accuracy。
+2. 使用 Time-MQA 微调后的模型在 TimeSeriesExam1 上的 official flexible accuracy。
 3. 如果效果不好，再调整 `max_seq_length`、上下文字段格式、LoRA 参数或模型规模。
 
 ## 5. 常用命令汇总
@@ -417,8 +402,8 @@ python scripts/check_local_model.py --model_name_or_path models/Qwen2.5-1.5B
 基座模型测试 Exam1：
 
 ```bash
-cd llamafactory_sft
-bash scripts/eval_exam1_base_model.sh --model_name_or_path ../models/Qwen2.5-1.5B --max_samples 20
+cd trl_sft
+python scripts/eval_exam1_qwen15b_base_official.py --model_name_or_path ../models/Qwen2.5-1.5B --max_samples 20
 ```
 
 TRL 使用 Time-MQA 微调：
@@ -433,5 +418,5 @@ bash scripts/train_timemqa_local_qlora.sh
 
 ```bash
 cd trl_sft
-bash scripts/eval_exam1_sft.sh --adapter_name_or_path outputs/qwen2.5-1.5b-timemqa-local-lora --max_samples 50
+python scripts/eval_exam1_qwen15b_lora_official.py --adapter_name_or_path outputs/qwen2.5-1.5b-timemqa-local-lora --max_samples 50
 ```
