@@ -109,6 +109,10 @@ def expand_local_files(patterns: list[str]) -> list[str]:
     return files
 
 
+def missing_local_files(files: list[str]) -> list[str]:
+    return [path for path in files if not os.path.exists(path)]
+
+
 def local_dataset_loader(files: list[str]) -> str:
     extension = os.path.splitext(files[0])[1].lower().lstrip(".")
     if extension == "jsonl":
@@ -128,6 +132,16 @@ def load_raw_dataset(args: argparse.Namespace) -> DatasetDict:
         extension = local_dataset_loader(local_files)
         loaded = load_dataset(extension, data_files=data_files)
     else:
+        missing_files = missing_local_files(local_files)
+        if args.dataset_name == "local":
+            raise FileNotFoundError(
+                "Local dataset files were not found, so the trainer cannot load --dataset_name local.\n"
+                f"Current working directory: {os.getcwd()}\n"
+                f"--data_files resolved to: {local_files}\n"
+                f"Missing files: {missing_files}\n"
+                "Run from the trl_sft directory or pass an absolute path, for example:\n"
+                "  --data_files data/processed/timemqa_local_train.json"
+            )
         data_files = {args.split: args.data_files} if args.data_files else None
         loaded = load_dataset(args.dataset_name, data_files=data_files)
 
