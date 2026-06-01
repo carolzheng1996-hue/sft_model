@@ -242,6 +242,29 @@ bash scripts/train_timemqa_local_qlora.sh
 trl_sft/outputs/qwen2.5-1.5b-timemqa-local-lora
 ```
 
+如果要使用多卡 QLoRA，使用 `accelerate launch` 包装的多卡脚本。GPU 数量由 `NUM_PROCESSES` 控制，不是 `SFTTrainer` 的入参：
+
+```bash
+NUM_PROCESSES=4 bash scripts/train_timemqa_local_multigpu_qlora.sh
+```
+
+等价直接命令：
+
+```bash
+accelerate launch --num_processes 4 train_sft_multigpu_qlora.py \
+  --model_name_or_path ../models/Qwen2.5-1.5B \
+  --dataset_name local \
+  --data_files data/processed/timemqa_local_train.json \
+  --bf16 \
+  --per_device_train_batch_size 1 \
+  --gradient_accumulation_steps 16 \
+  --max_seq_length 2048 \
+  --num_train_epochs 2 \
+  --output_dir outputs/qwen2.5-1.5b-timemqa-local-multigpu-qlora
+```
+
+多卡训练输出仍然是 LoRA adapter，不需要因为多卡训练而手动合并每张卡的参数。评测时可以继续加载本地基座模型和 LoRA adapter。
+
 ### 2.1 TRL SFT 直接执行命令
 
 如果只跑 TRL 路线，可以从仓库根目录按下面顺序执行：
@@ -260,11 +283,17 @@ python scripts/inspect_dataset.py \
 # 3. 用 QLoRA 做 TRL SFT
 bash scripts/train_timemqa_local_qlora.sh
 
-# 4. 用官方 TimeSeriesExam 评测规则测试 LoRA adapter
+# 3b. 可选：多卡 QLoRA
+# NUM_PROCESSES=4 bash scripts/train_timemqa_local_multigpu_qlora.sh
+
+# 4. 用官方 TimeSeriesExam 评测规则测试 LoRA adapter，单进程
 python scripts/eval_exam1_qwen15b_lora_official.py \
   --model_name_or_path ../models/Qwen2.5-1.5B \
   --adapter_name_or_path outputs/qwen2.5-1.5b-timemqa-local-lora \
   --max_samples 50
+
+# 4b. 可选：多卡并行评测，按样本切分到多张 GPU
+# NUM_PROCESSES=4 bash scripts/eval_exam1_qwen15b_lora_official_parallel.sh
 ```
 
 如果你的 GPU 不支持 bf16，需要编辑：
@@ -371,6 +400,27 @@ python scripts/eval_exam1_qwen15b_lora_official.py \
   --max_samples 0
 ```
 
+如果要提高评测速度，可以使用多卡并行评测脚本。它会把选中的样本按 rank 切分，每张卡独立生成预测，最后由 rank 0 合并结果：
+
+```bash
+NUM_PROCESSES=4 bash scripts/eval_exam1_qwen15b_lora_official_parallel.sh
+```
+
+等价直接命令：
+
+```bash
+accelerate launch --num_processes 4 scripts/eval_exam1_qwen15b_lora_official_parallel.py \
+  --model_name_or_path ../models/Qwen2.5-1.5B \
+  --adapter_name_or_path outputs/qwen2.5-1.5b-timemqa-local-lora \
+  --max_samples 0
+```
+
+输出：
+
+```text
+trl_sft/reports/timeseries_exam1_qwen15b_lora_official_predictions_parallel.jsonl
+```
+
 ### 3.2 测试 LLaMA-Factory 微调后的 adapter
 
 如果第 2 步使用的是 LLaMA-Factory，adapter 路径通常是：
@@ -447,9 +497,24 @@ bash scripts/prepare_timemqa_local_data.sh
 bash scripts/train_timemqa_local_qlora.sh
 ```
 
+TRL 多卡 QLoRA 微调：
+
+```bash
+cd trl_sft
+bash scripts/prepare_timemqa_local_data.sh
+NUM_PROCESSES=4 bash scripts/train_timemqa_local_multigpu_qlora.sh
+```
+
 微调后测试 Exam1：
 
 ```bash
 cd trl_sft
 python scripts/eval_exam1_qwen15b_lora_official.py --adapter_name_or_path outputs/qwen2.5-1.5b-timemqa-local-lora --max_samples 50
+```
+
+微调后多卡并行测试 Exam1：
+
+```bash
+cd trl_sft
+NUM_PROCESSES=4 bash scripts/eval_exam1_qwen15b_lora_official_parallel.sh
 ```

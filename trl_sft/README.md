@@ -5,7 +5,9 @@ This directory contains a minimal Hugging Face + TRL SFT pipeline for fine-tunin
 ## Files
 
 - `train_sft.py`: main TRL SFT script for `messages` datasets with LoRA/QLoRA support.
+- `train_sft_multigpu_qlora.py`: multi-GPU QLoRA variant for `accelerate launch` or `torchrun`.
 - `scripts/inspect_dataset.py`: prints dataset splits, columns, features, and examples before training.
+- `scripts/eval_exam1_qwen15b_lora_official_parallel.py`: sample-parallel multi-GPU LoRA adapter evaluation on TimeSeriesExam1.
 - `requirements.txt`: Python dependencies.
 - `configs/qwen25_15b_tsqa_lora.yaml`: Time-MQA/TSQA reference hyperparameters.
 - `configs/qwen25_15b_timemqa_local_lora.yaml`: local Time-MQA CSV reference hyperparameters.
@@ -111,6 +113,37 @@ python train_sft.py \
 
 If your GPU does not support bf16, use `--fp16` instead of `--bf16`.
 
+### Multi-GPU QLoRA
+
+GPU count is controlled by the launcher, not by an `SFTTrainer` argument. The multi-GPU script keeps TRL `SFTTrainer` as the training framework and maps each distributed process to its own `LOCAL_RANK` GPU before loading the 4-bit model.
+
+Run the provided wrapper:
+
+```bash
+NUM_PROCESSES=4 bash scripts/train_timemqa_local_multigpu_qlora.sh
+```
+
+Equivalent direct command:
+
+```bash
+accelerate launch --num_processes 4 train_sft_multigpu_qlora.py \
+  --model_name_or_path ../models/Qwen2.5-1.5B \
+  --dataset_name local \
+  --data_files data/processed/timemqa_local_train.json \
+  --bf16 \
+  --per_device_train_batch_size 1 \
+  --gradient_accumulation_steps 16 \
+  --max_seq_length 2048 \
+  --num_train_epochs 2 \
+  --output_dir outputs/qwen2.5-1.5b-timemqa-local-multigpu-qlora
+```
+
+For `N` GPUs, the effective training batch size is:
+
+```text
+per_device_train_batch_size * gradient_accumulation_steps * N
+```
+
 Quick smoke test:
 
 ```bash
@@ -184,6 +217,27 @@ python scripts/eval_exam1_qwen15b_lora_official.py \
   --model_name_or_path ../models/Qwen2.5-1.5B \
   --adapter_name_or_path outputs/qwen2.5-1.5b-timemqa-local-lora \
   --max_samples 50
+```
+
+Evaluate a LoRA adapter faster with multiple GPUs:
+
+```bash
+NUM_PROCESSES=4 bash scripts/eval_exam1_qwen15b_lora_official_parallel.sh
+```
+
+Equivalent direct command:
+
+```bash
+accelerate launch --num_processes 4 scripts/eval_exam1_qwen15b_lora_official_parallel.py \
+  --model_name_or_path ../models/Qwen2.5-1.5B \
+  --adapter_name_or_path outputs/qwen2.5-1.5b-timemqa-local-lora \
+  --max_samples 0
+```
+
+The parallel evaluation script splits selected examples by rank, writes temporary per-rank JSONL files, then rank 0 merges them into:
+
+```text
+reports/timeseries_exam1_qwen15b_lora_official_predictions_parallel.jsonl
 ```
 
 The scripts write JSONL predictions to:

@@ -34,6 +34,14 @@ bash scripts/prepare_timemqa_local_data.sh
 bash scripts/train_timemqa_local_qlora.sh
 ```
 
+Multi-GPU QLoRA training and parallel adapter evaluation are also available:
+
+```bash
+cd trl_sft
+NUM_PROCESSES=4 bash scripts/train_timemqa_local_multigpu_qlora.sh
+NUM_PROCESSES=4 bash scripts/eval_exam1_qwen15b_lora_official_parallel.sh
+```
+
 ### LLaMA-Factory
 
 See [llamafactory_sft/README.md](llamafactory_sft/README.md).
@@ -97,6 +105,13 @@ python scripts/eval_exam1_qwen15b_lora_official.py \
   --max_samples 50
 ```
 
+For faster full-dataset evaluation on multiple GPUs, use sample-level parallel evaluation:
+
+```bash
+cd trl_sft
+NUM_PROCESSES=4 bash scripts/eval_exam1_qwen15b_lora_official_parallel.sh
+```
+
 TRL training now requires a prepared conversational `messages` dataset. `trl_sft/train_sft.py` no longer trains directly from raw TimeSeriesExam1 columns such as `ts1`, `ts2`, or `options`; convert TimeSeriesExam1 to a file with a `messages` column before using the TRL trainer.
 
 Train on this dataset with LLaMA-Factory:
@@ -139,6 +154,8 @@ mkdir -p models
 cd trl_sft
 bash scripts/prepare_timemqa_local_data.sh
 bash scripts/train_timemqa_local_qlora.sh
+# optional multi-GPU variant:
+# NUM_PROCESSES=4 bash scripts/train_timemqa_local_multigpu_qlora.sh
 
 # 3. Or train with LLaMA-Factory on TimeSeriesExam1.
 cd ../llamafactory_sft
