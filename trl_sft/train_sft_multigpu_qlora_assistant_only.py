@@ -24,6 +24,7 @@ DEFAULT_DATASETS_CACHE = PROJECT_ROOT / "datasets" / ".hf_cache"
 os.environ.setdefault("HF_DATASETS_CACHE", str(DEFAULT_DATASETS_CACHE))
 
 import torch
+from accelerate import PartialState
 from datasets import Dataset, DatasetDict, load_dataset
 from huggingface_hub import login
 from peft import LoraConfig, prepare_model_for_kbit_training
@@ -180,11 +181,12 @@ def load_raw_dataset(args: argparse.Namespace) -> DatasetDict:
     all_local = bool(local_files) and all(os.path.exists(path) for path in local_files)
     data_files: dict[str, list[str]] | None = None
 
-    if all_local:
-        data_files = {args.split: local_files}
-        extension = local_dataset_loader(local_files)
-        loaded = load_dataset(extension, data_files=data_files)
-    else:
+    def load_once() -> Dataset | DatasetDict:
+        if all_local:
+            data_files = {args.split: local_files}
+            extension = local_dataset_loader(local_files)
+            return load_dataset(extension, data_files=data_files)
+
         missing_files = missing_local_files(local_files)
         if args.dataset_name == "local":
             raise FileNotFoundError(
@@ -196,16 +198,23 @@ def load_raw_dataset(args: argparse.Namespace) -> DatasetDict:
                 "  --data_files data/processed/timemqa_local_train.json"
             )
         data_files = {args.split: args.data_files} if args.data_files else None
-        loaded = load_dataset(args.dataset_name, data_files=data_files)
+        return load_dataset(args.dataset_name, data_files=data_files)
 
-    if isinstance(loaded, Dataset):
-        loaded = DatasetDict({args.split: loaded})
+    def prepare_loaded_dataset() -> DatasetDict:
+        loaded = load_once()
+        if isinstance(loaded, Dataset):
+            loaded = DatasetDict({args.split: loaded})
 
-    if args.eval_split and args.eval_split in loaded:
-        return DatasetDict(train=loaded[args.split], eval=loaded[args.eval_split])
+        if args.eval_split and args.eval_split in loaded:
+            return DatasetDict(train=loaded[args.split], eval=loaded[args.eval_split])
 
-    split_ds = loaded[args.split].train_test_split(test_size=args.test_size, seed=args.seed)
-    return DatasetDict(train=split_ds["train"], eval=split_ds["test"])
+        split_ds = loaded[args.split].train_test_split(test_size=args.test_size, seed=args.seed, keep_in_memory=True)
+        return DatasetDict(train=split_ds["train"], eval=split_ds["test"])
+
+    if is_distributed():
+        with PartialState().main_process_first():
+            return prepare_loaded_dataset()
+    return prepare_loaded_dataset()
 
 
 def validate_message(message: Any, split_name: str, index: int, message_index: int) -> None:
