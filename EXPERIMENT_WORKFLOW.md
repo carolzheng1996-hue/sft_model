@@ -265,7 +265,35 @@ accelerate launch --num_processes 4 train_sft_multigpu_qlora.py \
 
 多卡训练输出仍然是 LoRA adapter，不需要因为多卡训练而手动合并每张卡的参数。评测时可以继续加载本地基座模型和 LoRA adapter。
 
-### 2.1 TRL SFT 直接执行命令
+### 2.1 使用 train_cot messages 数据做 assistant-only loss SFT
+
+如果使用已经转换好的 CoT 数据：
+
+```text
+trl_sft/data/processed/train_cot_messages.jsonl
+```
+
+推荐使用 assistant-only loss 版本脚本训练。这样 `system` 和 `user` 部分只作为上下文输入，不参与 loss；loss 只计算在 `assistant.content` 上，也就是 `<think>...</think>` CoT 和最终答案部分。
+
+单卡训练用：
+
+```bash
+cd trl_sft
+python train_sft_assistant_only.py \
+  --dataset_name local \
+  --data_files data/processed/train_cot_messages.jsonl
+```
+
+多卡训练用：
+
+```bash
+cd trl_sft
+accelerate launch --num_processes 4 train_sft_multigpu_qlora_assistant_only.py \
+  --dataset_name local \
+  --data_files data/processed/train_cot_messages.jsonl
+```
+
+### 2.2 TRL SFT 直接执行命令
 
 如果只跑 TRL 路线，可以从仓库根目录按下面顺序执行：
 
