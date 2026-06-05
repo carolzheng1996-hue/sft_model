@@ -15,7 +15,9 @@ from __future__ import annotations
 import argparse
 import glob
 import inspect
+import json
 import os
+import random
 from pathlib import Path
 from typing import Any
 
@@ -176,15 +178,61 @@ def local_dataset_loader(files: list[str]) -> str:
     raise ValueError(f"Unsupported local file extension: {extension!r}. Use csv, json, jsonl, or parquet.")
 
 
+def load_local_json_records(files: list[str]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for file_path in files:
+        extension = os.path.splitext(file_path)[1].lower()
+        with open(file_path, "r", encoding="utf-8") as handle:
+            if extension == ".jsonl":
+                for line_number, line in enumerate(handle, start=1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parsed = json.loads(line)
+                    if not isinstance(parsed, dict):
+                        raise ValueError(f"{file_path}:{line_number} must be a JSON object.")
+                    rows.append(parsed)
+                continue
+
+            parsed = json.load(handle)
+            if isinstance(parsed, list):
+                for index, row in enumerate(parsed):
+                    if not isinstance(row, dict):
+                        raise ValueError(f"{file_path}[{index}] must be a JSON object.")
+                    rows.append(row)
+            elif isinstance(parsed, dict) and isinstance(parsed.get("messages"), list):
+                rows.append(parsed)
+            else:
+                raise ValueError(f"{file_path} must contain a JSON list of objects or one messages object.")
+    return rows
+
+
+def split_records(rows: list[dict[str, Any]], test_size: float, seed: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not rows:
+        raise ValueError("Dataset is empty after loading local JSON/JSONL files.")
+    indices = list(range(len(rows)))
+    random.Random(seed).shuffle(indices)
+    eval_size = max(1, int(len(indices) * test_size))
+    eval_indices = set(indices[:eval_size])
+    train_rows = [row for index, row in enumerate(rows) if index not in eval_indices]
+    eval_rows = [row for index, row in enumerate(rows) if index in eval_indices]
+    return train_rows, eval_rows
+
+
 def load_raw_dataset(args: argparse.Namespace) -> DatasetDict:
     local_files = expand_local_files(args.data_files) if args.data_files else []
     all_local = bool(local_files) and all(os.path.exists(path) for path in local_files)
     data_files: dict[str, list[str]] | None = None
 
+    if all_local and local_dataset_loader(local_files) == "json" and not args.eval_split:
+        rows = load_local_json_records(local_files)
+        train_rows, eval_rows = split_records(rows, test_size=args.test_size, seed=args.seed)
+        return DatasetDict(train=Dataset.from_list(train_rows), eval=Dataset.from_list(eval_rows))
+
     def load_once() -> Dataset | DatasetDict:
         if all_local:
-            data_files = {args.split: local_files}
             extension = local_dataset_loader(local_files)
+            data_files = {args.split: local_files}
             return load_dataset(extension, data_files=data_files)
 
         missing_files = missing_local_files(local_files)
@@ -208,8 +256,16 @@ def load_raw_dataset(args: argparse.Namespace) -> DatasetDict:
         if args.eval_split and args.eval_split in loaded:
             return DatasetDict(train=loaded[args.split], eval=loaded[args.eval_split])
 
-        split_ds = loaded[args.split].train_test_split(test_size=args.test_size, seed=args.seed, keep_in_memory=True)
-        return DatasetDict(train=split_ds["train"], eval=split_ds["test"])
+        dataset = loaded[args.split]
+        indices = list(range(len(dataset)))
+        random.Random(args.seed).shuffle(indices)
+        eval_size = max(1, int(len(indices) * args.test_size))
+        eval_indices = indices[:eval_size]
+        train_indices = indices[eval_size:]
+        return DatasetDict(
+            train=dataset.select(train_indices, keep_in_memory=True),
+            eval=dataset.select(eval_indices, keep_in_memory=True),
+        )
 
     if is_distributed():
         with PartialState().main_process_first():
