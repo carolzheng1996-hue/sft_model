@@ -313,6 +313,18 @@ bash scripts/train_cot_assistant_only_qlora.sh
 NUM_PROCESSES=4 bash scripts/train_cot_assistant_only_multigpu_qlora.sh
 ```
 
+如果模型、数据或输出目录不在默认位置，可以通过环境变量覆盖。例如在 2 张 GPU 上训练本地 `Qwen2.5-3B-Instruct`：
+
+```bash
+cd trl_sft
+MODEL_NAME_OR_PATH=/data/sft_model/Qwen2.5-3B-Instruct \
+DATA_FILES=data/processed/train_cot_messages.jsonl \
+OUTPUT_DIR=outputs/qwen2.5-3b-train-cot-assistant-only-multigpu-qlora \
+NUM_PROCESSES=2 \
+NUM_TRAIN_EPOCHS=1 \
+bash scripts/train_cot_assistant_only_multigpu_qlora.sh
+```
+
 ### 2.2 TRL SFT 直接执行命令
 
 如果只跑 TRL 路线，可以从仓库根目录按下面顺序执行：
