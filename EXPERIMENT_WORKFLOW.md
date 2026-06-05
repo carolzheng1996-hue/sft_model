@@ -280,8 +280,12 @@ trl_sft/data/processed/train_cot_messages.jsonl
 ```bash
 cd trl_sft
 python train_sft_assistant_only.py \
+  --model_name_or_path ../models/Qwen2.5-1.5B \
   --dataset_name local \
-  --data_files data/processed/train_cot_messages.jsonl
+  --data_files data/processed/train_cot_messages.jsonl \
+  --use_4bit \
+  --bf16 \
+  --output_dir outputs/qwen2.5-1.5b-train-cot-assistant-only-lora
 ```
 
 多卡训练用：
@@ -289,8 +293,24 @@ python train_sft_assistant_only.py \
 ```bash
 cd trl_sft
 accelerate launch --num_processes 4 train_sft_multigpu_qlora_assistant_only.py \
+  --model_name_or_path ../models/Qwen2.5-1.5B \
   --dataset_name local \
-  --data_files data/processed/train_cot_messages.jsonl
+  --data_files data/processed/train_cot_messages.jsonl \
+  --bf16 \
+  --per_device_train_batch_size 1 \
+  --gradient_accumulation_steps 16 \
+  --max_seq_length 2048 \
+  --num_train_epochs 2 \
+  --output_dir outputs/qwen2.5-1.5b-train-cot-assistant-only-multigpu-qlora
+```
+
+也可以直接使用仓库提供的 wrapper 脚本：
+
+```bash
+cd trl_sft
+bash scripts/train_cot_assistant_only_qlora.sh
+
+NUM_PROCESSES=4 bash scripts/train_cot_assistant_only_multigpu_qlora.sh
 ```
 
 ### 2.2 TRL SFT 直接执行命令
