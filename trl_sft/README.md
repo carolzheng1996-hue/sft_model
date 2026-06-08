@@ -6,6 +6,8 @@ This directory contains a minimal Hugging Face + TRL SFT pipeline for fine-tunin
 
 - `train_sft.py`: main TRL SFT script for `messages` datasets with LoRA/QLoRA support.
 - `train_sft_multigpu_qlora.py`: multi-GPU QLoRA variant for `accelerate launch` or `torchrun`.
+- `train_sft_multigpu_qlora_completion_only.py`: multi-GPU QLoRA for single-turn CoT `messages`; uses `DataCollatorForCompletionOnlyLM` so only assistant replies contribute to loss.
+- `train_sft_multigpu_qlora_full_loss.py`: multi-GPU QLoRA full-sequence loss baseline for CoT `messages`.
 - `scripts/inspect_dataset.py`: prints dataset splits, columns, features, and examples before training.
 - `scripts/eval_exam1_qwen15b_lora_official_parallel.py`: sample-parallel multi-GPU LoRA adapter evaluation on TimeSeriesExam1.
 - `requirements.txt`: Python dependencies.
@@ -142,6 +144,47 @@ For `N` GPUs, the effective training batch size is:
 
 ```text
 per_device_train_batch_size * gradient_accumulation_steps * N
+```
+
+## Train on train_cot CoT Messages
+
+The prepared CoT file is:
+
+```text
+data/processed/train_cot_messages.jsonl
+```
+
+Recommended command for assistant-reply-only loss without `SFTConfig(assistant_only_loss=True)`:
+
+```bash
+NUM_PROCESSES=4 bash scripts/train_cot_completion_only_multigpu_qlora.sh
+```
+
+This script formats each single-turn `messages` example with `tokenizer.apply_chat_template(..., add_generation_prompt=True)`, appends the assistant content, and uses:
+
+```text
+DataCollatorForCompletionOnlyLM(response_template="<|im_start|>assistant\n")
+```
+
+The prompt side may be left-truncated when a sample exceeds `MAX_SEQ_LENGTH`, so the assistant marker and assistant reply are preserved for loss computation.
+
+Full-sequence loss baseline:
+
+```bash
+NUM_PROCESSES=4 bash scripts/train_cot_full_loss_multigpu_qlora.sh
+```
+
+In this baseline, `system`, `user`, and `assistant` tokens all contribute to causal LM loss. Use it for comparison, not as the default CoT SFT setting.
+
+Common overrides:
+
+```bash
+MODEL_NAME_OR_PATH=/data/sft_model/Qwen2.5-3B-Instruct \
+DATA_FILES=data/processed/train_cot_messages.jsonl \
+OUTPUT_DIR=outputs/qwen2.5-3b-train-cot-completion-only-multigpu-qlora \
+NUM_PROCESSES=2 \
+MAX_SEQ_LENGTH=4096 \
+bash scripts/train_cot_completion_only_multigpu_qlora.sh
 ```
 
 Quick smoke test:

@@ -265,7 +265,7 @@ accelerate launch --num_processes 4 train_sft_multigpu_qlora.py \
 
 多卡训练输出仍然是 LoRA adapter，不需要因为多卡训练而手动合并每张卡的参数。评测时可以继续加载本地基座模型和 LoRA adapter。
 
-### 2.1 使用 train_cot messages 数据做 assistant-only loss SFT
+### 2.1 使用 train_cot messages 数据做 CoT SFT
 
 如果使用已经转换好的 CoT 数据：
 
@@ -273,7 +273,73 @@ accelerate launch --num_processes 4 train_sft_multigpu_qlora.py \
 trl_sft/data/processed/train_cot_messages.jsonl
 ```
 
-推荐使用 assistant-only loss 版本脚本训练。这样 `system` 和 `user` 部分只作为上下文输入，不参与 loss；loss 只计算在 `assistant.content` 上，也就是 `<think>...</think>` CoT 和最终答案部分。
+优先推荐 completion-only collator 版本训练。这样 `system` 和 `user` 部分只作为上下文输入，不参与 loss；loss 只计算在 assistant 回复上，也就是 `<think>...</think>` CoT 和最终答案部分。这个版本不使用 `SFTConfig(assistant_only_loss=True)`，而是使用 TRL 的 `DataCollatorForCompletionOnlyLM` 根据 Qwen 的 assistant marker 做 label mask。
+
+允许使用的 train_cot 多卡训练指令如下。
+
+#### 推荐：completion-only collator，多卡 QLoRA
+
+```bash
+cd trl_sft
+NUM_PROCESSES=4 bash scripts/train_cot_completion_only_multigpu_qlora.sh
+```
+
+等价直接命令：
+
+```bash
+cd trl_sft
+accelerate launch --num_processes 4 train_sft_multigpu_qlora_completion_only.py \
+  --model_name_or_path ../models/Qwen2.5-1.5B \
+  --dataset_name local \
+  --data_files data/processed/train_cot_messages.jsonl \
+  --bf16 \
+  --per_device_train_batch_size 1 \
+  --gradient_accumulation_steps 16 \
+  --max_seq_length 2048 \
+  --num_train_epochs 2 \
+  --output_dir outputs/qwen2.5-1.5b-train-cot-completion-only-multigpu-qlora
+```
+
+该脚本会先用 `tokenizer.apply_chat_template(..., add_generation_prompt=True)` 格式化 prompt，再拼接 assistant 内容，并在样本过长时从 prompt 左侧裁剪，优先保留 assistant marker 和 assistant 回复，降低长 prompt 导致无有效 assistant label 的风险。
+
+如果模型、数据或输出目录不在默认位置，可以通过环境变量覆盖：
+
+```bash
+cd trl_sft
+MODEL_NAME_OR_PATH=/data/sft_model/Qwen2.5-3B-Instruct \
+DATA_FILES=data/processed/train_cot_messages.jsonl \
+OUTPUT_DIR=outputs/qwen2.5-3b-train-cot-completion-only-multigpu-qlora \
+NUM_PROCESSES=2 \
+NUM_TRAIN_EPOCHS=1 \
+bash scripts/train_cot_completion_only_multigpu_qlora.sh
+```
+
+#### 对照：full-loss，多卡 QLoRA
+
+如果需要对照实验，让 `system`、`user` 和 `assistant` 全部参与 causal LM loss，可以使用 full-loss 版本：
+
+```bash
+cd trl_sft
+NUM_PROCESSES=4 bash scripts/train_cot_full_loss_multigpu_qlora.sh
+```
+
+等价直接命令：
+
+```bash
+cd trl_sft
+accelerate launch --num_processes 4 train_sft_multigpu_qlora_full_loss.py \
+  --model_name_or_path ../models/Qwen2.5-1.5B \
+  --dataset_name local \
+  --data_files data/processed/train_cot_messages.jsonl \
+  --bf16 \
+  --per_device_train_batch_size 1 \
+  --gradient_accumulation_steps 16 \
+  --max_seq_length 2048 \
+  --num_train_epochs 2 \
+  --output_dir outputs/qwen2.5-1.5b-train-cot-full-loss-multigpu-qlora
+```
+
+#### 兼容：原生 assistant-only loss
 
 单卡训练用：
 
@@ -324,6 +390,8 @@ NUM_PROCESSES=2 \
 NUM_TRAIN_EPOCHS=1 \
 bash scripts/train_cot_assistant_only_multigpu_qlora.sh
 ```
+
+注意：train_cot 中存在较长 prompt。若使用原生 `assistant_only_loss=True` 路线，`max_seq_length` 截断后可能出现 assistant token 被截掉，从而导致 eval loss 为 `nan`。completion-only collator 版本通过优先保留 assistant 回复来规避这类样本问题；如果仍然遇到极长 assistant 回复，需要提高 `MAX_SEQ_LENGTH` 或清洗数据。
 
 ### 2.2 TRL SFT 直接执行命令
 
