@@ -6,7 +6,7 @@ This directory contains a minimal Hugging Face + TRL SFT pipeline for fine-tunin
 
 - `train_sft.py`: main TRL SFT script for `messages` datasets with LoRA/QLoRA support.
 - `train_sft_multigpu_qlora.py`: multi-GPU QLoRA variant for `accelerate launch` or `torchrun`.
-- `train_sft_multigpu_qlora_completion_only.py`: multi-GPU QLoRA for single-turn CoT `messages`; uses `DataCollatorForCompletionOnlyLM` so only assistant replies contribute to loss.
+- `train_sft_multigpu_qlora_completion_only.py`: multi-GPU QLoRA for single-turn CoT `messages`; uses a local completion-only collator so only assistant replies contribute to loss.
 - `train_sft_multigpu_qlora_full_loss.py`: multi-GPU QLoRA full-sequence loss baseline for CoT `messages`.
 - `scripts/inspect_dataset.py`: prints dataset splits, columns, features, and examples before training.
 - `scripts/eval_exam1_qwen15b_lora_official_parallel.py`: sample-parallel multi-GPU LoRA adapter evaluation on TimeSeriesExam1.
@@ -154,16 +154,24 @@ The prepared CoT file is:
 data/processed/train_cot_messages.jsonl
 ```
 
+There are three train_cot multi-GPU variants:
+
+| Script | Loss scope | Data path | Recommended use |
+| --- | --- | --- | --- |
+| `train_sft_multigpu_qlora_completion_only.py` | Assistant reply text only | Converts single-turn `messages` to `text`, then masks everything through the assistant marker with a local collator | Default choice for train_cot CoT SFT, especially when prompts are long |
+| `train_sft_multigpu_qlora_assistant_only.py` | Assistant regions marked by the chat template | Keeps `messages` and uses TRL `assistant_only_loss=True` with generation masks | Use when you want the native TRL conversational path or multi-turn data |
+| `train_sft_multigpu_qlora_full_loss.py` | Full rendered sequence: `system`, `user`, and `assistant` | Converts complete `messages` to `text` and applies no label mask | Baseline/comparison run, not the default CoT SFT setting |
+
 Recommended command for assistant-reply-only loss without `SFTConfig(assistant_only_loss=True)`:
 
 ```bash
 NUM_PROCESSES=4 bash scripts/train_cot_completion_only_multigpu_qlora.sh
 ```
 
-This script formats each single-turn `messages` example with `tokenizer.apply_chat_template(..., add_generation_prompt=True)`, appends the assistant content, and uses:
+This script formats each single-turn `messages` example with `tokenizer.apply_chat_template(..., add_generation_prompt=True)`, appends the assistant content, and uses a local completion-only collator compatible with current TRL releases:
 
 ```text
-DataCollatorForCompletionOnlyLM(response_template="<|im_start|>assistant\n")
+CompletionOnlyDataCollator(response_template="<|im_start|>assistant\n")
 ```
 
 The prompt side may be left-truncated when a sample exceeds `MAX_SEQ_LENGTH`, so the assistant marker and assistant reply are preserved for loss computation.

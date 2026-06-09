@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Multi-GPU QLoRA SFT with completion-only loss via TRL data collator.
+"""Multi-GPU QLoRA SFT with completion-only loss via a data collator.
 
 This script keeps the existing assistant_only trainer untouched. It formats
-single-turn messages into text with tokenizer.apply_chat_template, then uses
-DataCollatorForCompletionOnlyLM to mask prompt tokens from the loss.
+single-turn messages into text with tokenizer.apply_chat_template, then masks
+prompt tokens from the loss.
 """
 
 from __future__ import annotations
@@ -27,23 +27,72 @@ from accelerate import PartialState
 from datasets import Dataset, DatasetDict, load_dataset
 from huggingface_hub import login
 from peft import LoraConfig, prepare_model_for_kbit_training
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, PreTrainedTokenizerBase
 from trl import SFTConfig, SFTTrainer
-
-try:
-    from trl import DataCollatorForCompletionOnlyLM
-except ImportError:
-    try:
-        from trl.trainer.utils import DataCollatorForCompletionOnlyLM
-    except ImportError as exc:
-        raise ImportError(
-            "DataCollatorForCompletionOnlyLM was not found in this TRL installation. "
-            "Install a TRL version that provides it, or use the assistant_only trainer."
-        ) from exc
 
 
 DEFAULT_LOCAL_MODEL_PATH = "../models/Qwen2.5-1.5B"
 DEFAULT_RESPONSE_TEMPLATE = "<|im_start|>assistant\n"
+IGNORE_INDEX = -100
+
+
+class CompletionOnlyDataCollator:
+    """Mask all labels through the assistant response marker.
+
+    TRL removed DataCollatorForCompletionOnlyLM from newer releases. This local
+    collator keeps the same behavior needed by this script without pinning TRL
+    to an older version.
+    """
+
+    def __init__(
+        self,
+        response_template: str,
+        tokenizer: PreTrainedTokenizerBase,
+        ignore_index: int = IGNORE_INDEX,
+    ) -> None:
+        self.tokenizer = tokenizer
+        self.ignore_index = ignore_index
+        self.response_token_ids = tokenizer(response_template, add_special_tokens=False)["input_ids"]
+        if not self.response_token_ids:
+            raise ValueError("response_template must tokenize to at least one token.")
+
+    @staticmethod
+    def _find_subsequence(sequence: list[int], subsequence: list[int]) -> int:
+        if len(subsequence) > len(sequence):
+            return -1
+        last_start = len(sequence) - len(subsequence)
+        for start in range(last_start + 1):
+            if sequence[start : start + len(subsequence)] == subsequence:
+                return start
+        return -1
+
+    def __call__(self, features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        batch = self.tokenizer.pad(features, padding=True, return_tensors="pt")
+        labels = batch["input_ids"].clone()
+        attention_mask = batch.get("attention_mask")
+        if attention_mask is not None:
+            labels[attention_mask == 0] = self.ignore_index
+
+        for row_index, input_ids in enumerate(batch["input_ids"].tolist()):
+            if attention_mask is not None:
+                valid_length = int(attention_mask[row_index].sum().item())
+                input_ids = input_ids[:valid_length]
+            marker_start = self._find_subsequence(input_ids, self.response_token_ids)
+            if marker_start < 0:
+                decoded = self.tokenizer.decode(
+                    input_ids,
+                    skip_special_tokens=False,
+                    clean_up_tokenization_spaces=False,
+                )
+                raise ValueError(
+                    "Could not find response_template token ids in a training example. "
+                    f"Check --response_template. Example prefix: {decoded[:200]!r}"
+                )
+            response_start = marker_start + len(self.response_token_ids)
+            labels[row_index, :response_start] = self.ignore_index
+
+        batch["labels"] = labels
+        return batch
 
 
 def parse_args() -> argparse.Namespace:
@@ -460,7 +509,7 @@ def main() -> None:
             )
 
         training_args = make_sft_config(args)
-        data_collator = DataCollatorForCompletionOnlyLM(response_template=args.response_template, tokenizer=tokenizer)
+        data_collator = CompletionOnlyDataCollator(response_template=args.response_template, tokenizer=tokenizer)
         trainer = make_trainer(model, tokenizer, training_args, dataset, peft_config, data_collator)
         trainer.train()
         trainer.save_model(args.output_dir)

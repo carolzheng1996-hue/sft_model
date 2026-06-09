@@ -273,7 +273,15 @@ accelerate launch --num_processes 4 train_sft_multigpu_qlora.py \
 trl_sft/data/processed/train_cot_messages.jsonl
 ```
 
-优先推荐 completion-only collator 版本训练。这样 `system` 和 `user` 部分只作为上下文输入，不参与 loss；loss 只计算在 assistant 回复上，也就是 `<think>...</think>` CoT 和最终答案部分。这个版本不使用 `SFTConfig(assistant_only_loss=True)`，而是使用 TRL 的 `DataCollatorForCompletionOnlyLM` 根据 Qwen 的 assistant marker 做 label mask。
+优先推荐 completion-only collator 版本训练。这样 `system` 和 `user` 部分只作为上下文输入，不参与 loss；loss 只计算在 assistant 回复上，也就是 `<think>...</think>` CoT 和最终答案部分。这个版本不使用 `SFTConfig(assistant_only_loss=True)`，而是使用脚本内置的 `CompletionOnlyDataCollator` 根据 Qwen 的 assistant marker 做 label mask，可兼容 TRL 0.24.0 这类不再导出 `DataCollatorForCompletionOnlyLM` 的版本。
+
+train_cot 相关的三个多卡脚本区别如下：
+
+| 脚本 | loss 范围 | 数据处理方式 | 建议用途 |
+| --- | --- | --- | --- |
+| `train_sft_multigpu_qlora_completion_only.py` | 只计算 assistant 正文 | 单轮 `messages` 先转成 `text`，再用脚本内置 collator mask 掉 assistant marker 之前的 token | 默认推荐，用于 CoT SFT，尤其适合长 prompt |
+| `train_sft_multigpu_qlora_assistant_only.py` | 计算 chat template 标记出的 assistant 区域 | 保留 `messages`，依赖 TRL `assistant_only_loss=True` 和 `{% generation %}` mask | 需要新版 TRL 原生 conversational 路线或多轮数据时使用 |
+| `train_sft_multigpu_qlora_full_loss.py` | `system`、`user`、`assistant` 全序列都参与 loss | 完整 `messages` 渲染成 `text`，不做 label mask | 只建议做 baseline/对照实验，不作为 train_cot 默认训练方式 |
 
 允许使用的 train_cot 多卡训练指令如下。
 
