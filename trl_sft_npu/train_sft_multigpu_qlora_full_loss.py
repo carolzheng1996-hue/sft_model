@@ -1,0 +1,380 @@
+#!/usr/bin/env python3
+"""Multi-NPU LoRA SFT with full-sequence causal LM loss."""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import inspect
+import json
+import os
+import random
+from pathlib import Path
+from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_DATASETS_CACHE = PROJECT_ROOT / "datasets" / ".hf_cache"
+os.environ.setdefault("HF_DATASETS_CACHE", str(DEFAULT_DATASETS_CACHE))
+
+import torch
+import torch.distributed as dist
+from accelerate import PartialState
+from datasets import Dataset, DatasetDict, load_dataset
+from huggingface_hub import login
+from peft import LoraConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from trl import SFTConfig, SFTTrainer
+
+from npu_utils import current_device_map, get_torch_dtype, setup_npu, training_optim, validate_quantization_args
+
+
+DEFAULT_LOCAL_MODEL_PATH = "../models/Qwen2.5-1.5B"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="TRL LoRA SFT with full-sequence loss.")
+    parser.add_argument("--model_name_or_path", default=DEFAULT_LOCAL_MODEL_PATH)
+    parser.add_argument("--dataset_name", default="local")
+    parser.add_argument("--data_files", nargs="*", default=["data/processed/train_cot_messages.jsonl"])
+    parser.add_argument("--split", default="train")
+    parser.add_argument("--eval_split", default=None)
+    parser.add_argument("--test_size", type=float, default=0.02)
+    parser.add_argument("--max_train_samples", type=int, default=None)
+    parser.add_argument("--max_eval_samples", type=int, default=1024)
+    parser.add_argument("--output_dir", default="outputs/qwen2.5-1.5b-train-cot-full-loss-multigpu-qlora")
+    parser.add_argument("--max_seq_length", type=int, default=2048)
+    parser.add_argument("--num_train_epochs", type=float, default=2.0)
+    parser.add_argument("--per_device_train_batch_size", type=int, default=1)
+    parser.add_argument("--per_device_eval_batch_size", type=int, default=1)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=16)
+    parser.add_argument("--learning_rate", type=float, default=2e-4)
+    parser.add_argument("--warmup_ratio", type=float, default=0.03)
+    parser.add_argument("--weight_decay", type=float, default=0.0)
+    parser.add_argument("--logging_steps", type=int, default=10)
+    parser.add_argument("--save_steps", type=int, default=500)
+    parser.add_argument("--eval_steps", type=int, default=500)
+    parser.add_argument("--save_total_limit", type=int, default=2)
+    parser.add_argument("--lr_scheduler_type", default="cosine")
+    parser.add_argument("--bf16", action="store_true")
+    parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--use_4bit", action="store_true", help="Unsupported on Ascend NPU; kept only for CLI compatibility and will raise if set.")
+    parser.add_argument("--no_4bit", action="store_false", dest="use_4bit")
+    parser.add_argument("--no_lora", action="store_true")
+    parser.add_argument("--lora_r", type=int, default=16)
+    parser.add_argument("--lora_alpha", type=int, default=32)
+    parser.add_argument("--lora_dropout", type=float, default=0.05)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--push_to_hub", action="store_true")
+    parser.add_argument("--hub_model_id", default=None)
+    parser.set_defaults(use_4bit=False)
+    return parser.parse_args()
+
+
+def get_local_rank() -> int:
+    return int(os.environ.get("LOCAL_RANK", "-1"))
+
+
+def get_global_rank() -> int:
+    return int(os.environ.get("RANK", "-1"))
+
+
+def get_world_size() -> int:
+    return int(os.environ.get("WORLD_SIZE", "1"))
+
+
+def is_distributed() -> bool:
+    return get_world_size() > 1
+
+
+def is_main_process() -> bool:
+    return get_global_rank() in {-1, 0}
+
+
+def qlora_device_map() -> None:
+    return current_device_map()
+
+
+def maybe_login() -> None:
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if token:
+        login(token=token, add_to_git_credential=False)
+
+
+def configure_local_dataset_cache() -> None:
+    os.environ.setdefault("HF_DATASETS_CACHE", str(DEFAULT_DATASETS_CACHE))
+    os.makedirs(os.environ["HF_DATASETS_CACHE"], exist_ok=True)
+
+
+def expand_local_files(patterns: list[str]) -> list[str]:
+    files: list[str] = []
+    for pattern in patterns:
+        matches = sorted(glob.glob(pattern))
+        files.extend(matches if matches else [pattern])
+    return files
+
+
+def local_dataset_loader(files: list[str]) -> str:
+    extension = os.path.splitext(files[0])[1].lower().lstrip(".")
+    if extension == "jsonl":
+        return "json"
+    if extension in {"csv", "json", "parquet"}:
+        return extension
+    raise ValueError(f"Unsupported local file extension: {extension!r}.")
+
+
+def load_local_json_records(files: list[str]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for file_path in files:
+        extension = os.path.splitext(file_path)[1].lower()
+        with open(file_path, "r", encoding="utf-8") as handle:
+            if extension == ".jsonl":
+                for line_number, line in enumerate(handle, start=1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parsed = json.loads(line)
+                    if not isinstance(parsed, dict):
+                        raise ValueError(f"{file_path}:{line_number} must be a JSON object.")
+                    rows.append(parsed)
+                continue
+            parsed = json.load(handle)
+            if isinstance(parsed, list):
+                rows.extend(parsed)
+            elif isinstance(parsed, dict):
+                rows.append(parsed)
+            else:
+                raise ValueError(f"{file_path} must contain JSON objects.")
+    return rows
+
+
+def split_records(rows: list[dict[str, Any]], test_size: float, seed: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not rows:
+        raise ValueError("Dataset is empty after loading local JSON/JSONL files.")
+    indices = list(range(len(rows)))
+    random.Random(seed).shuffle(indices)
+    eval_size = max(1, int(len(indices) * test_size))
+    eval_indices = set(indices[:eval_size])
+    train_rows = [row for index, row in enumerate(rows) if index not in eval_indices]
+    eval_rows = [row for index, row in enumerate(rows) if index in eval_indices]
+    return train_rows, eval_rows
+
+
+def load_raw_dataset(args: argparse.Namespace) -> DatasetDict:
+    local_files = expand_local_files(args.data_files) if args.data_files else []
+    all_local = bool(local_files) and all(os.path.exists(path) for path in local_files)
+
+    if all_local and local_dataset_loader(local_files) == "json" and not args.eval_split:
+        rows = load_local_json_records(local_files)
+        train_rows, eval_rows = split_records(rows, test_size=args.test_size, seed=args.seed)
+        return DatasetDict(train=Dataset.from_list(train_rows), eval=Dataset.from_list(eval_rows))
+
+    def prepare_loaded_dataset() -> DatasetDict:
+        if all_local:
+            loaded = load_dataset(local_dataset_loader(local_files), data_files={args.split: local_files})
+        else:
+            if args.dataset_name == "local":
+                raise FileNotFoundError(f"Local dataset files were not found: {local_files}")
+            loaded = load_dataset(args.dataset_name, data_files={args.split: args.data_files} if args.data_files else None)
+        if isinstance(loaded, Dataset):
+            loaded = DatasetDict({args.split: loaded})
+        if args.eval_split and args.eval_split in loaded:
+            return DatasetDict(train=loaded[args.split], eval=loaded[args.eval_split])
+        dataset = loaded[args.split]
+        indices = list(range(len(dataset)))
+        random.Random(args.seed).shuffle(indices)
+        eval_size = max(1, int(len(indices) * args.test_size))
+        return DatasetDict(
+            train=dataset.select(indices[eval_size:], keep_in_memory=True),
+            eval=dataset.select(indices[:eval_size], keep_in_memory=True),
+        )
+
+    if is_distributed():
+        with PartialState().main_process_first():
+            return prepare_loaded_dataset()
+    return prepare_loaded_dataset()
+
+
+def validate_message(message: Any, split_name: str, index: int, message_index: int) -> None:
+    if not isinstance(message, dict):
+        raise ValueError(f"{split_name}[{index}].messages[{message_index}] must be an object.")
+    role = message.get("role")
+    content = message.get("content")
+    if role not in {"system", "user", "assistant"}:
+        raise ValueError(f"{split_name}[{index}].messages[{message_index}].role is invalid: {role!r}.")
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError(f"{split_name}[{index}].messages[{message_index}].content must be non-empty.")
+
+
+def validate_messages_example(example: dict[str, Any], split_name: str, index: int) -> None:
+    messages = example.get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise ValueError(f"{split_name}[{index}].messages must be a non-empty list.")
+    roles = []
+    for message_index, message in enumerate(messages):
+        validate_message(message, split_name, index, message_index)
+        roles.append(message["role"])
+    if "user" not in roles or "assistant" not in roles:
+        raise ValueError(f"{split_name}[{index}].messages must include at least one user and one assistant message.")
+
+
+def select_requested_samples(raw: DatasetDict, args: argparse.Namespace) -> DatasetDict:
+    prepared = raw
+    if args.max_train_samples:
+        prepared["train"] = prepared["train"].select(range(min(args.max_train_samples, len(prepared["train"]))))
+    if args.max_eval_samples and "eval" in prepared:
+        prepared["eval"] = prepared["eval"].select(range(min(args.max_eval_samples, len(prepared["eval"]))))
+    for split_name, dataset in prepared.items():
+        if "messages" not in dataset.column_names:
+            raise ValueError(f"Split {split_name!r} does not contain a 'messages' column.")
+        for index, example in enumerate(dataset):
+            validate_messages_example(example, split_name, index)
+    return prepared
+
+
+def validate_local_model_dir(model_name_or_path: str) -> None:
+    if not os.path.isdir(model_name_or_path):
+        raise FileNotFoundError(f"Local model directory not found: {model_name_or_path!r}.")
+
+
+def build_model_and_tokenizer(args: argparse.Namespace):
+    validate_local_model_dir(args.model_name_or_path)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_name_or_path,
+        trust_remote_code=True,
+        use_fast=True,
+        local_files_only=True,
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"
+
+    validate_quantization_args(args.use_4bit)
+
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_name_or_path,
+        trust_remote_code=True,
+        torch_dtype=get_torch_dtype(args.bf16, args.fp16),
+        device_map=current_device_map(),
+        local_files_only=True,
+    )
+    model.config.use_cache = False
+    return model, tokenizer
+
+
+def make_text_dataset(raw: DatasetDict, tokenizer: AutoTokenizer) -> DatasetDict:
+    text_dataset = DatasetDict()
+    for split_name, dataset in raw.items():
+        rows = []
+        for example in dataset:
+            text = tokenizer.apply_chat_template(example["messages"], tokenize=False, add_generation_prompt=False)
+            rows.append({"text": text})
+        text_dataset[split_name] = Dataset.from_list(rows)
+        if is_main_process():
+            print(f"{split_name}: formatted {len(rows)} examples for full-sequence loss.")
+    return text_dataset
+
+
+def make_sft_config(args: argparse.Namespace) -> SFTConfig:
+    supported = set(inspect.signature(SFTConfig.__init__).parameters)
+    kwargs: dict[str, Any] = dict(
+        output_dir=args.output_dir,
+        packing=False,
+        num_train_epochs=args.num_train_epochs,
+        per_device_train_batch_size=args.per_device_train_batch_size,
+        per_device_eval_batch_size=args.per_device_eval_batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        learning_rate=args.learning_rate,
+        warmup_ratio=args.warmup_ratio,
+        weight_decay=args.weight_decay,
+        lr_scheduler_type=args.lr_scheduler_type,
+        logging_steps=args.logging_steps,
+        save_steps=args.save_steps,
+        eval_steps=args.eval_steps,
+        save_strategy="steps",
+        save_total_limit=args.save_total_limit,
+        bf16=args.bf16,
+        fp16=args.fp16,
+        gradient_checkpointing=True,
+        optim=training_optim(args.use_4bit),
+        report_to="none",
+        seed=args.seed,
+        push_to_hub=args.push_to_hub,
+        hub_model_id=args.hub_model_id,
+    )
+    if "dataset_text_field" in supported:
+        kwargs["dataset_text_field"] = "text"
+    if "ddp_find_unused_parameters" in supported and is_distributed():
+        kwargs["ddp_find_unused_parameters"] = False
+    if "gradient_checkpointing_kwargs" in supported:
+        kwargs["gradient_checkpointing_kwargs"] = {"use_reentrant": False}
+    if "max_seq_length" in supported:
+        kwargs["max_seq_length"] = args.max_seq_length
+    elif "max_length" in supported:
+        kwargs["max_length"] = args.max_seq_length
+    if "eval_strategy" in supported:
+        kwargs["eval_strategy"] = "steps"
+    elif "evaluation_strategy" in supported:
+        kwargs["evaluation_strategy"] = "steps"
+    return SFTConfig(**{key: value for key, value in kwargs.items() if key in supported})
+
+
+def make_trainer(
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    training_args: SFTConfig,
+    dataset: DatasetDict,
+    peft_config: LoraConfig | None,
+) -> SFTTrainer:
+    kwargs: dict[str, Any] = dict(
+        model=model,
+        args=training_args,
+        train_dataset=dataset["train"],
+        eval_dataset=dataset.get("eval"),
+        peft_config=peft_config,
+    )
+    supported = set(inspect.signature(SFTTrainer.__init__).parameters)
+    if "processing_class" in supported:
+        kwargs["processing_class"] = tokenizer
+    elif "tokenizer" in supported:
+        kwargs["tokenizer"] = tokenizer
+    if "dataset_text_field" in supported:
+        kwargs["dataset_text_field"] = "text"
+    return SFTTrainer(**{key: value for key, value in kwargs.items() if key in supported})
+
+
+def main() -> None:
+    try:
+        args = parse_args()
+        setup_npu()
+        configure_local_dataset_cache()
+        maybe_login()
+        if is_main_process():
+            print(f"Starting full-loss LoRA SFT: world_size={get_world_size()}, output_dir={args.output_dir}")
+
+        raw = select_requested_samples(load_raw_dataset(args), args)
+        model, tokenizer = build_model_and_tokenizer(args)
+        dataset = make_text_dataset(raw, tokenizer)
+
+        peft_config = None
+        if not args.no_lora:
+            peft_config = LoraConfig(
+                r=args.lora_r,
+                lora_alpha=args.lora_alpha,
+                lora_dropout=args.lora_dropout,
+                bias="none",
+                task_type="CAUSAL_LM",
+                target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+            )
+
+        training_args = make_sft_config(args)
+        trainer = make_trainer(model, tokenizer, training_args, dataset, peft_config)
+        trainer.train()
+        trainer.save_model(args.output_dir)
+        tokenizer.save_pretrained(args.output_dir)
+    finally:
+        if dist.is_available() and dist.is_initialized():
+            dist.destroy_process_group()
+
+
+if __name__ == "__main__":
+    main()

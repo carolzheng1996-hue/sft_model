@@ -1,0 +1,10 @@
+# Install torch and torch-npu from the Ascend/CANN wheel index matching your
+# driver, firmware, CANN, and Python versions before installing this file.
+transformers>=4.46.0
+datasets>=2.20.0
+trl>=0.12.0
+accelerate>=0.33.0
+peft>=0.12.0
+huggingface_hub>=0.24.0
+sentencepiece>=0.2.0
+protobuf>=4.25.0

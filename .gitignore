@@ -26,6 +26,10 @@ llamafactory_sft/.venv/
 # Generated datasets / reports
 timeMQA/*.csv
 trl_sft/data/processed/*.json
+trl_sft_npu/data/processed/*.json
+trl_sft_npu/data/processed/*.jsonl
+trl_sft_npu/outputs/
+trl_sft_npu/reports/
 llamafactory_sft/data/*.json
 !llamafactory_sft/data/dataset_info.json
 reports/
